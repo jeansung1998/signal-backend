@@ -13,10 +13,12 @@ from app.routers import presence, users, match, radio, ws
 
 app = FastAPI(title="SIGNAL API", version="0.1.0")
 
-# TODO: narrow this to the actual frontend origin(s) before going to production.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://signalearth.kr",
+        "https://www.signalearth.kr",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
