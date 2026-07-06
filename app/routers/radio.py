@@ -9,6 +9,7 @@ clean "stations near this city" filter.
 Etiquette from their docs: always send a descriptive User-Agent so
 they can see which apps use the service.
 """
+import time
 import math
 import httpx
 from fastapi import APIRouter, Query
@@ -89,3 +90,60 @@ def register_click(station_uuid: str):
         res = client.get(f"{RADIO_BROWSER_HOST}/json/url/{station_uuid}")
         res.raise_for_status()
         return res.json()
+
+_markers_cache: dict = {"data": None, "ts": 0}
+MARKERS_CACHE_TTL = 60 * 30  # 30분 캐시
+
+
+@router.get("/markers")
+def radio_markers(limit: int = 800):
+    """
+    지구본에 찍을 '라디오 도시' 마커 목록.
+    전세계 인기 방송국을 좌표 격자(0.5도)로 묶어서 도시 단위 클러스터로 반환한다.
+    Radio Browser API 부하를 줄이기 위해 30분간 캐시한다.
+    """
+    now = time.time()
+    if _markers_cache["data"] is not None and (now - _markers_cache["ts"]) < MARKERS_CACHE_TTL:
+        return _markers_cache["data"]
+
+    params = {
+        "has_geo_info": "true",
+        "hidebroken": "true",
+        "order": "votes",
+        "reverse": "true",
+        "limit": limit,
+    }
+    with httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=15) as client:
+        res = client.get(f"{RADIO_BROWSER_HOST}/json/stations/search", params=params)
+        res.raise_for_status()
+        stations = res.json()
+
+    clusters: dict[tuple[float, float], dict] = {}
+    GRID = 0.5  # 도 단위, 적도 기준 약 55km
+
+    for s in stations:
+        lat, lng = s.get("geo_lat"), s.get("geo_long")
+        if lat is None or lng is None:
+            continue
+        key = (round(lat / GRID) * GRID, round(lng / GRID) * GRID)
+        if key not in clusters:
+            clusters[key] = {
+                "lat": lat,
+                "lng": lng,
+                "country": s.get("country", ""),
+                "count": 1,
+                "top_station": {
+                    "stationuuid": s["stationuuid"],
+                    "name": s["name"],
+                    "url": s.get("url_resolved") or s["url"],
+                    "favicon": s.get("favicon") or None,
+                },
+            }
+        else:
+            clusters[key]["count"] += 1
+            # 이미 votes 내림차순으로 정렬돼 있으므로 처음 잡힌 방송국이 top_station으로 유지됨
+
+    result = list(clusters.values())
+    _markers_cache["data"] = result
+    _markers_cache["ts"] = now
+    return result    
