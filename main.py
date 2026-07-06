@@ -15,10 +15,7 @@ app = FastAPI(title="SIGNAL API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://signalearth.kr",
-        "https://www.signalearth.kr",
-    ],
+    allow_origin_regex=r"https://(.*\.lovableproject\.com|signalearth\.kr|www\.signalearth\.kr)",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
