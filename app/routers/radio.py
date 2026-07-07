@@ -15,6 +15,8 @@ import logging
 import httpx
 from fastapi import APIRouter, Query
 
+from app.database import get_supabase
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,50 @@ def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * R * math.asin(math.sqrt(a))
 
 
+def _nearest_country_code(lat: float, lng: float) -> str | None:
+    """
+    클릭한 좌표에서 제일 가까운 `places` 테이블 도시를 찾아 그 나라의
+    country_code를 반환한다. Radio Browser에는 위치 반경 검색이 없어서,
+    "이 좌표는 어느 나라에 가까운가"를 우리 places 데이터로 근사한 뒤
+    그 나라 방송국만 검색 대상으로 좁히는 데 쓴다.
+    """
+    try:
+        sb = get_supabase()
+        res = sb.table("places").select("country_code, lat, lng").execute()
+        rows = res.data or []
+    except Exception as e:
+        logger.warning("stations_near: places lookup failed: %s", e)
+        return None
+
+    best_code = None
+    best_dist = float("inf")
+    for r in rows:
+        if r.get("lat") is None or r.get("lng") is None:
+            continue
+        d = haversine_km(lat, lng, r["lat"], r["lng"])
+        if d < best_dist:
+            best_dist = d
+            best_code = r.get("country_code")
+    return best_code
+
+
+def _search_stations(countrycode: str | None, pool_size: int = 300) -> list:
+    params = {
+        "has_geo_info": "true",
+        "hidebroken": "true",
+        "order": "votes",
+        "reverse": "true",
+        "limit": pool_size,
+    }
+    if countrycode:
+        params["countrycode"] = countrycode.upper()
+
+    with httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=10) as client:
+        res = client.get(f"{RADIO_BROWSER_HOST}/json/stations/search", params=params)
+        res.raise_for_status()
+        return res.json()
+
+
 @router.get("/stations")
 def stations_near(
     lat: float,
@@ -39,24 +85,27 @@ def stations_near(
     limit: int = 20,
 ):
     """
-    Returns up to `limit` stations, nearest-first, to the given coordinates.
-    Narrowing by countrycode first keeps the upstream request small —
-    without it we'd have to pull a much bigger slice of the global list.
-    """
-    params = {
-        "has_geo_info": "true",
-        "hidebroken": "true",
-        "order": "votes",
-        "reverse": "true",
-        "limit": 300,
-    }
-    if countrycode:
-        params["countrycode"] = countrycode.upper()
+    Returns up to `limit` stations, nearest-first, to the given coordinates —
+    restricted to the country nearest (lat, lng), never other countries.
 
-    with httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=10) as client:
-        res = client.get(f"{RADIO_BROWSER_HOST}/json/stations/search", params=params)
-        res.raise_for_status()
-        candidates = res.json()
+    If `countrycode` isn't given, we look up the nearest country via the
+    `places` table and search only that country's stations. We
+    deliberately do NOT fall back to a global search anymore: showing
+    e.g. a Korean station while browsing Bali because Bali has no
+    stations is more confusing than just showing nothing, since the
+    whole point is "what plays *here*". If a country genuinely has no
+    stations with geo info in Radio Browser, the response is an empty list.
+    """
+    resolved_countrycode = countrycode
+
+    if not resolved_countrycode:
+        resolved_countrycode = _nearest_country_code(lat, lng)
+
+    if not resolved_countrycode:
+        # 좌표에 해당하는 나라를 아예 못 찾은 경우 (places 조회 실패 등)
+        return []
+
+    candidates = _search_stations(resolved_countrycode, pool_size=300)
 
     ranked = []
     for s in candidates:
@@ -76,6 +125,7 @@ def stations_near(
             "country": s.get("country", ""),
             "votes": s.get("votes", 0),
             "distance_km": round(dist, 1),
+            "resolved_countrycode": resolved_countrycode,
         }
         for dist, s in ranked[:limit]
     ]
