@@ -28,6 +28,7 @@ app.include_router(radio.router, prefix="/radio", tags=["radio"])
 app.include_router(ws.router, prefix="/ws", tags=["websocket"])
 app.include_router(travel.router, tags=["travel"])
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
+app.include_router(translate_api.router, tags=["translate"])
 
 @app.get("/health")
 def health():
