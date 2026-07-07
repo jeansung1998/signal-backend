@@ -9,7 +9,7 @@ Deploy target: Railway (same pattern as KOKO's toto-server).
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import presence, users, match, radio, ws, travel, admin
+from app.routers import presence, users, match, radio, ws, travel, admin, translate_api
 
 app = FastAPI(title="SIGNAL API", version="0.1.0")
 
