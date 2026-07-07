@@ -4,6 +4,12 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.database import get_supabase
 from app.connection_manager import manager
 from app.routers.match import reset_chat_room_timeout
+from app.translation import (
+    resolve_target_language,
+    translate_text,
+    set_user_language_override,
+    clear_user_language_override,
+)
 
 router = APIRouter()
 
@@ -14,10 +20,29 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     try:
         while True:
             data = await websocket.receive_json()
-            if data.get("type") == "chat_message":
+            msg_type = data.get("type")
+            if msg_type == "chat_message":
                 await _handle_chat_message(user_id, data)
+            elif msg_type == "set_language":
+                await _handle_set_language(user_id, data)
     except WebSocketDisconnect:
         manager.disconnect(user_id, websocket)
+
+
+async def _handle_set_language(user_id: str, data: dict):
+    """
+    Lets a user override the language their incoming messages get
+    translated into (the "choose recipient's language" button).
+    Send {"type": "set_language", "lang": "ja"} to set it, or
+    {"type": "set_language", "lang": null} to go back to the
+    country_code-based default.
+    """
+    lang = data.get("lang")
+    if lang:
+        set_user_language_override(user_id, lang)
+    else:
+        clear_user_language_override(user_id)
+    await manager.send_to_user(user_id, {"type": "language_set", "lang": lang})
 
 
 async def _handle_chat_message(sender_id: str, data: dict):
@@ -41,6 +66,9 @@ async def _handle_chat_message(sender_id: str, data: dict):
 
     now = datetime.now(timezone.utc)
 
+    # We keep the original text in the DB (audit trail / admin view).
+    # Translation happens per-recipient at send time since two people
+    # in the same room can each want a different target language.
     msg_result = sb.table("messages").insert({
         "room_id": room_id,
         "sender_id": sender_id,
@@ -52,7 +80,14 @@ async def _handle_chat_message(sender_id: str, data: dict):
     reset_chat_room_timeout(room_id, user_a, user_b)
 
     receiver_id = user_b if sender_id == user_a else user_a
-    payload = {
+
+    receiver_row = sb.table("users").select("country_code").eq("id", receiver_id).single().execute()
+    receiver_country = receiver_row.data.get("country_code") if receiver_row.data else None
+    target_lang = resolve_target_language(receiver_id, receiver_country)
+    translated_content = await translate_text(content, target_lang)
+
+    # Sender sees their own message exactly as they typed it.
+    sender_payload = {
         "type": "chat_message",
         "room_id": room_id,
         "message_id": saved_message["id"],
@@ -60,5 +95,13 @@ async def _handle_chat_message(sender_id: str, data: dict):
         "content": content,
         "created_at": saved_message["created_at"],
     }
-    await manager.send_to_user(sender_id, payload)
-    await manager.send_to_user(receiver_id, payload)
+    # Receiver only ever sees the translated version — the original
+    # is not sent to them, per the "auto-translate, hide original" design.
+    receiver_payload = {
+        **sender_payload,
+        "content": translated_content,
+        "translated": translated_content != content,
+    }
+
+    await manager.send_to_user(sender_id, sender_payload)
+    await manager.send_to_user(receiver_id, receiver_payload)
