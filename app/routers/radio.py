@@ -11,10 +11,12 @@ they can see which apps use the service.
 """
 import time
 import math
+import logging
 import httpx
 from fastapi import APIRouter, Query
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 RADIO_BROWSER_HOST = "https://de1.api.radio-browser.info"
 USER_AGENT = "Signal-App/0.1 (prototype)"
@@ -91,39 +93,76 @@ def register_click(station_uuid: str):
         res.raise_for_status()
         return res.json()
 
+
 _markers_cache: dict = {"data": None, "ts": 0}
 MARKERS_CACHE_TTL = 60 * 30  # 30분 캐시
 
+GRID = 0.5  # 도 단위, 적도 기준 약 55km
 
-@router.get("/markers")
-def radio_markers(limit: int = 800):
-    """
-    지구본에 찍을 '라디오 도시' 마커 목록.
-    전세계 인기 방송국을 좌표 격자(0.5도)로 묶어서 도시 단위 클러스터로 반환한다.
-    Radio Browser API 부하를 줄이기 위해 30분간 캐시한다.
-    """
-    now = time.time()
-    if _markers_cache["data"] is not None and (now - _markers_cache["ts"]) < MARKERS_CACHE_TTL:
-        return _markers_cache["data"]
+# ---------------------------------------------------------------------------
+# 지역 확충: 글로벌 top-voted 쿼리만으로는 인기 방송국이 적은 지역
+# (한국/일본/호주 제외 대부분 소규모 섬 지역)이 거의 안 잡히므로,
+# 지역별로 별도 조회해서 강제로 클러스터에 포함시킨다.
+#
+# bbox = (lat_min, lat_max, lng_min, lng_max). 국가 전체가 대상 지역인
+# 경우(한국/일본/호주)는 countrycode만으로 충분해서 bbox=None.
+# 국가 안의 특정 지역만 원하는 경우(하와이/발리)는 countrycode로 1차
+# 후보를 좁힌 뒤 bbox로 한 번 더 필터링한다 (state 메타데이터가
+# 부정확한 방송국이 많아서 좌표 검증이 필요함).
+# ---------------------------------------------------------------------------
+REGION_QUERIES = [
+    {"name": "Korea", "countrycode": "KR", "bbox": None, "limit": 200},
+    {"name": "Japan", "countrycode": "JP", "bbox": None, "limit": 250},
+    {"name": "Australia", "countrycode": "AU", "bbox": None, "limit": 200},
+    {
+        "name": "Hawaii",
+        "countrycode": "US",
+        "bbox": (18.5, 22.5, -160.5, -154.5),
+        "limit": 150,
+    },
+    {"name": "Guam", "countrycode": "GU", "bbox": None, "limit": 50},
+    {
+        "name": "Saipan (N. Mariana Islands)",
+        "countrycode": "MP",
+        "bbox": None,
+        "limit": 50,
+    },
+    {
+        "name": "Bali",
+        "countrycode": "ID",
+        "bbox": (-9.0, -8.0, 114.3, 115.8),
+        "limit": 200,
+    },
+]
 
+
+def _in_bbox(lat: float, lng: float, bbox) -> bool:
+    if bbox is None:
+        return True
+    lat_min, lat_max, lng_min, lng_max = bbox
+    return lat_min <= lat <= lat_max and lng_min <= lng <= lng_max
+
+
+def _fetch_stations(client: httpx.Client, countrycode: str, limit: int) -> list:
     params = {
         "has_geo_info": "true",
         "hidebroken": "true",
         "order": "votes",
         "reverse": "true",
         "limit": limit,
+        "countrycode": countrycode,
     }
-    with httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=15) as client:
-        res = client.get(f"{RADIO_BROWSER_HOST}/json/stations/search", params=params)
-        res.raise_for_status()
-        stations = res.json()
+    res = client.get(f"{RADIO_BROWSER_HOST}/json/stations/search", params=params)
+    res.raise_for_status()
+    return res.json()
 
-    clusters: dict[tuple[float, float], dict] = {}
-    GRID = 0.5  # 도 단위, 적도 기준 약 55km
 
+def _add_to_clusters(clusters: dict, stations: list, bbox=None):
     for s in stations:
         lat, lng = s.get("geo_lat"), s.get("geo_long")
         if lat is None or lng is None:
+            continue
+        if not _in_bbox(lat, lng, bbox):
             continue
         key = (round(lat / GRID) * GRID, round(lng / GRID) * GRID)
         if key not in clusters:
@@ -143,7 +182,50 @@ def radio_markers(limit: int = 800):
             clusters[key]["count"] += 1
             # 이미 votes 내림차순으로 정렬돼 있으므로 처음 잡힌 방송국이 top_station으로 유지됨
 
+
+@router.get("/markers")
+def radio_markers(limit: int = 800):
+    """
+    지구본에 찍을 '라디오 도시' 마커 목록.
+    전세계 인기 방송국을 좌표 격자(0.5도)로 묶어서 도시 단위 클러스터로 반환한다.
+    Radio Browser API 부하를 줄이기 위해 30분간 캐시한다.
+
+    1) 글로벌 top-voted 방송국으로 기본 클러스터를 만들고
+    2) REGION_QUERIES에 정의된 지역들을 별도로 조회해서 보강한다.
+       (인기순 글로벌 쿼리만으로는 소규모 지역이 거의 안 잡히기 때문)
+    """
+    now = time.time()
+    if _markers_cache["data"] is not None and (now - _markers_cache["ts"]) < MARKERS_CACHE_TTL:
+        return _markers_cache["data"]
+
+    clusters: dict[tuple[float, float], dict] = {}
+
+    with httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=15) as client:
+        # 1) 글로벌 top-voted
+        try:
+            global_params = {
+                "has_geo_info": "true",
+                "hidebroken": "true",
+                "order": "votes",
+                "reverse": "true",
+                "limit": limit,
+            }
+            res = client.get(f"{RADIO_BROWSER_HOST}/json/stations/search", params=global_params)
+            res.raise_for_status()
+            _add_to_clusters(clusters, res.json())
+        except httpx.HTTPError as e:
+            logger.warning("radio markers: global query failed: %s", e)
+
+        # 2) 지역 확충 (한국/일본/호주/하와이/괌/사이판/발리)
+        for region in REGION_QUERIES:
+            try:
+                stations = _fetch_stations(client, region["countrycode"], region["limit"])
+                _add_to_clusters(clusters, stations, bbox=region["bbox"])
+            except httpx.HTTPError as e:
+                logger.warning("radio markers: region '%s' query failed: %s", region["name"], e)
+                continue
+
     result = list(clusters.values())
     _markers_cache["data"] = result
     _markers_cache["ts"] = now
-    return result    
+    return result

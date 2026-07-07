@@ -9,7 +9,7 @@ Deploy target: Railway (same pattern as KOKO's toto-server).
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import presence, users, match, radio, ws
+from app.routers import presence, users, match, radio, ws, travel
 
 app = FastAPI(title="SIGNAL API", version="0.1.0")
 
@@ -26,6 +26,7 @@ app.include_router(presence.router, prefix="/presence", tags=["presence"])
 app.include_router(match.router, prefix="/match", tags=["match"])
 app.include_router(radio.router, prefix="/radio", tags=["radio"])
 app.include_router(ws.router, prefix="/ws", tags=["websocket"])
+app.include_router(travel.router, tags=["travel"])
 
 @app.get("/health")
 def health():
