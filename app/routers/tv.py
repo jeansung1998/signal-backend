@@ -6,6 +6,8 @@ TV 채널 API — iptv-org에서 수집한 채널 중 우리 자체 헬스체크
 스케줄러가 자동으로 돌리지만, 배포 직후 첫 데이터 채우기나
 문제 확인용으로 수동 실행할 수 있게 열어둔다.
 """
+from collections import Counter
+
 from fastapi import APIRouter, Header, HTTPException, Query
 
 from app.database import get_supabase
@@ -35,6 +37,40 @@ def list_channels(
         query = query.eq("category", category)
     res = query.limit(limit).execute()
     return res.data
+
+
+@router.get("/markers")
+def tv_markers():
+    """
+    지구본에 찍을 'TV 국가' 마커 목록.
+
+    iptv-org 채널 데이터에는 라디오와 달리 개별 방송국 위경도가 없고
+    국가 코드만 있어서, 라디오처럼 좌표 클러스터링을 할 수가 없다.
+    대신 국가별로 활성 채널 개수를 세고, 이미 갖고 있는 `places`
+    테이블에서 그 나라의 대표 좌표(수도/주요 도시 기준)를 가져와
+    붙여서 국가 단위 마커로 반환한다.
+    """
+    sb = get_supabase()
+    channels_res = sb.table("tv_channels").select("country_code").eq("is_active", True).execute()
+    channels = channels_res.data or []
+    counts = Counter(c["country_code"] for c in channels if c.get("country_code"))
+
+    places_res = sb.table("places").select("country_code, country, lat, lng").execute()
+    places_by_country = {p["country_code"]: p for p in (places_res.data or [])}
+
+    markers = []
+    for cc, count in counts.items():
+        place = places_by_country.get(cc)
+        if not place:
+            continue
+        markers.append({
+            "country_code": cc,
+            "country": place["country"],
+            "lat": place["lat"],
+            "lng": place["lng"],
+            "count": count,
+        })
+    return markers
 
 
 @router.post("/ingest")
