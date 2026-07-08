@@ -25,6 +25,8 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 await _handle_chat_message(user_id, data)
             elif msg_type == "set_language":
                 await _handle_set_language(user_id, data)
+            elif msg_type == "leave_chat_room":
+                await _handle_leave_chat_room(user_id, data)
     except WebSocketDisconnect:
         manager.disconnect(user_id, websocket)
         sb = get_supabase()
@@ -37,7 +39,8 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         )
         for room in rooms_res.data:
             other_id = room["user_b"] if room["user_a"] == user_id else room["user_a"]
-            await manager.send_to_user(other_id, {"type": "user_left", "room_id": room["id"]})    
+            await manager.send_to_user(other_id, {"type": "user_left", "room_id": room["id"]})
+
 
 async def _handle_set_language(user_id: str, data: dict):
     """
@@ -53,6 +56,32 @@ async def _handle_set_language(user_id: str, data: dict):
     else:
         clear_user_language_override(user_id)
     await manager.send_to_user(user_id, {"type": "language_set", "lang": lang})
+
+
+async def _handle_leave_chat_room(user_id: str, data: dict):
+    """
+    Fired when a user explicitly clicks "채팅방 나가기" and sends
+    {"type": "leave_chat_room", "room_id": "..."} over the socket
+    (their socket connection itself stays open, since it's one
+    connection per user, not per room). Notify the other participant
+    so they see "상대방이 퇴장하셨습니다" in their chat window.
+    """
+    sb = get_supabase()
+    room_id = data.get("room_id")
+    if not room_id:
+        return
+
+    room_row = sb.table("chat_rooms").select("*").eq("id", room_id).execute()
+    if not room_row.data:
+        return
+    room = room_row.data[0]
+
+    user_a, user_b = room["user_a"], room["user_b"]
+    if user_id not in (user_a, user_b):
+        return
+
+    other_id = user_b if user_id == user_a else user_a
+    await manager.send_to_user(other_id, {"type": "user_left", "room_id": room_id})
 
 
 async def _handle_chat_message(sender_id: str, data: dict):
