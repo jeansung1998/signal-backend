@@ -127,3 +127,39 @@ def storage_usage(x_user_id: str | None = Header(None)):
             if is_warning else None
         ),
     }
+@router.get("/quality")
+def quality_metrics(x_user_id: str | None = Header(None)):
+    """
+    서비스 품질 지표: 활성 채널 비율, 매칭 성공률.
+    """
+    _require_admin(x_user_id)
+    sb = get_supabase()
+
+    total_channels = sb.table("tv_channels").select("id", count="exact").execute()
+    active_channels = (
+        sb.table("tv_channels").select("id", count="exact").eq("is_active", True).execute()
+    )
+    total_ch = total_channels.count or 0
+    active_ch = active_channels.count or 0
+    active_ratio = (active_ch / total_ch) if total_ch else 0
+
+    total_matches = sb.table("match_requests").select("id", count="exact").execute()
+    accepted_matches = (
+        sb.table("match_requests").select("id", count="exact").eq("status", "accepted").execute()
+    )
+    total_m = total_matches.count or 0
+    accepted_m = accepted_matches.count or 0
+    success_ratio = (accepted_m / total_m) if total_m else 0
+
+    return {
+        "tv_channels": {
+            "total": total_ch,
+            "active": active_ch,
+            "active_ratio": round(active_ratio, 4),
+        },
+        "match_requests": {
+            "total": total_m,
+            "accepted": accepted_m,
+            "success_ratio": round(success_ratio, 4),
+        },
+    }
