@@ -91,7 +91,7 @@ def search_places(q: str = Query(..., min_length=1), limit: int = 10):
     res = (
         sb.table("places")
         .select("*")
-        .or_(f"city.ilike.%{q}%,country.ilike.%{q}%")
+        .or_(f"city.ilike.%{q}%,city_en.ilike.%{q}%,country.ilike.%{q}%")
         .limit(limit)
         .execute()
     )
