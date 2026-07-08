@@ -13,6 +13,7 @@ class UserProfile(BaseModel):
     photo_url: str | None = None
     intro: str | None = None
     greeting_message: str | None = None
+    country_code: str | None = None
 
 
 class UserProfileUpdate(BaseModel):
@@ -20,6 +21,7 @@ class UserProfileUpdate(BaseModel):
     photo_url: str | None = None
     intro: str | None = None
     greeting_message: str | None = None
+    country_code: str | None = None
 
 
 class PresenceUpdate(BaseModel):
