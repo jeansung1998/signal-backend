@@ -27,7 +27,17 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
                 await _handle_set_language(user_id, data)
     except WebSocketDisconnect:
         manager.disconnect(user_id, websocket)
-
+        sb = get_supabase()
+        rooms_res = (
+            sb.table("chat_rooms")
+            .select("*")
+            .or_(f"user_a.eq.{user_id},user_b.eq.{user_id}")
+            .eq("status", "active")
+            .execute()
+        )
+        for room in rooms_res.data:
+            other_id = room["user_b"] if room["user_a"] == user_id else room["user_a"]
+            await manager.send_to_user(other_id, {"type": "user_left", "room_id": room["id"]})    
 
 async def _handle_set_language(user_id: str, data: dict):
     """
