@@ -8,8 +8,10 @@ Deploy target: Railway (same pattern as KOKO's toto-server).
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.routers import presence, users, match, radio, ws, travel, admin, translate_api
+from app.routers import presence, users, match, radio, ws, travel, admin, translate_api, tv
+from app.tv_health import run_health_check_batch
 
 app = FastAPI(title="SIGNAL API", version="0.1.0")
 
@@ -29,6 +31,19 @@ app.include_router(ws.router, prefix="/ws", tags=["websocket"])
 app.include_router(travel.router, tags=["travel"])
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
 app.include_router(translate_api.router, tags=["translate"])
+app.include_router(tv.router, prefix="/tv", tags=["tv"])
+
+scheduler = AsyncIOScheduler()
+
+
+@app.on_event("startup")
+async def start_scheduler():
+    # 1시간마다 오래 점검 안 된 TV 채널부터 300개씩 헬스체크.
+    # 만 개 넘는 전체 목록을 한 번에 다 돌면 부담이 커서 이렇게
+    # 조금씩 계속 순환하며 확인하는 방식으로 감.
+    scheduler.add_job(run_health_check_batch, "interval", hours=1, id="tv_health_check")
+    scheduler.start()
+
 
 @app.get("/health")
 def health():
