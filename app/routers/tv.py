@@ -89,8 +89,17 @@ def tv_markers():
 
     counts = Counter(c["country_code"] for c in channels if c.get("country_code"))
 
-    places_res = sb.table("places").select("country_code, country, lat, lng").execute()
-    places_by_country = {p["country_code"]: p for p in (places_res.data or [])}
+    places_res = sb.table("places").select("id, country_code, country, lat, lng").order("id").execute()
+    places_by_country: dict = {}
+    for p in (places_res.data or []):
+        cc = p.get("country_code")
+        if cc and cc not in places_by_country:
+            # 한 나라에 도시가 여러 개 있으면(한국/일본/호주 등 라디오
+            # 지역 확충 때 추가된 것들) id가 가장 빠른(=먼저 등록된
+            # 대표 도시, 보통 수도) 것만 쓴다. 그냥 덮어쓰기로 하면
+            # 어떤 도시가 마지막에 걸리느냐에 따라 오키나와 같은
+            # 변두리 도시가 뽑히는 문제가 있었다.
+            places_by_country[cc] = p
 
     markers = []
     for cc, count in counts.items():
