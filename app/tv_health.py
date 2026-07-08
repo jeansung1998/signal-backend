@@ -43,7 +43,7 @@ async def run_health_check_batch() -> dict:
     res = (
         sb.table("tv_channels")
         .select("id, url, consecutive_fail_count")
-        .order("last_checked_at", desc=False, nulls_first=True)
+        .order("last_checked_at", desc=False, nullsfirst=True)
         .limit(BATCH_SIZE)
         .execute()
     )
