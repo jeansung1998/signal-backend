@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.routers import presence, users, match, radio, ws, travel, admin, translate_api, tv
+from app.routers import presence, users, match, radio, ws, travel, admin, translate_api, tv, tv_favorites
 from app.tv_health import run_health_check_batch
 
 app = FastAPI(title="SIGNAL API", version="0.1.0")
@@ -32,6 +32,7 @@ app.include_router(travel.router, tags=["travel"])
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
 app.include_router(translate_api.router, tags=["translate"])
 app.include_router(tv.router, prefix="/tv", tags=["tv"])
+app.include_router(tv_favorites.router, tags=["tv_favorites"])
 
 scheduler = AsyncIOScheduler()
 
