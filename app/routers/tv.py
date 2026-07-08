@@ -63,8 +63,30 @@ def tv_markers():
         return _markers_cache["data"]
 
     sb = get_supabase()
-    channels_res = sb.table("tv_channels").select("country_code").eq("is_active", True).execute()
-    channels = channels_res.data or []
+
+    # Supabase/PostgREST는 한 번의 select 요청당 기본 최대 1,000개
+    # 행까지만 돌려준다. tv_channels가 1만 개가 넘어서 그냥
+    # .execute()만 하면 나머지는 통째로 누락된다 — 일본처럼 채널이
+    # 몇 개 안 되는 나라는 그 1,000개 안에 우연히 하나도 안 걸리면
+    # 마커 자체가 안 생기는 버그가 있었다. .range()로 전체를
+    # 페이지네이션하며 끝까지 다 훑는다.
+    channels: list = []
+    page_size = 1000
+    start = 0
+    while True:
+        page = (
+            sb.table("tv_channels")
+            .select("country_code")
+            .eq("is_active", True)
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        rows = page.data or []
+        channels.extend(rows)
+        if len(rows) < page_size:
+            break
+        start += page_size
+
     counts = Counter(c["country_code"] for c in channels if c.get("country_code"))
 
     places_res = sb.table("places").select("country_code, country, lat, lng").execute()
