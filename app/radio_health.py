@@ -3,12 +3,14 @@
 걸러낸다. tv_health.py와 동일한 패턴 — 배치로 나눠서 점검하고,
 연속 FAIL_THRESHOLD번 실패해야 is_active=false로 내린다.
 
-라디오 스트림은 TV와 달리 계속 흘러나오는 오디오라서, 일반 GET으로
-받으면 커넥션이 안 끊기고 계속 데이터를 받아버릴 수 있다. 그래서
-`client.stream()`으로 열어서 상태 코드만 확인하고 바로 연결을 닫는다
-(실제 오디오 바이트는 거의 안 받음).
+단순히 "연결이 되는가"(상태 코드만 확인)로는 안 걸러지는 경우가 많다
+— 서버는 응답하는데 실제로는 오디오가 안 나오거나(무음/빈 스트림),
+HTML 에러 페이지를 200으로 돌려주는 등. 그래서 실제로 오디오 바이트가
+몇 KB라도 흘러나오는지, Content-Type이 진짜 오디오 계열인지까지
+확인한다 — "전선에 손대서 전류가 흐르는지 확인"하는 것과 같은 원리.
 """
 import asyncio
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -20,26 +22,72 @@ CONCURRENCY = 20
 TIMEOUT_SECONDS = 8
 FAIL_THRESHOLD = 3  # 연속 3번 실패하면 비활성화
 
+MIN_BYTES = 2048  # 이 이상 실제로 받아야 "진짜 흐른다"고 판단 (2KB)
+AUDIO_CONTENT_TYPE_HINTS = ("audio", "mpeg", "ogg", "aac", "mp3", "octet-stream")
 
-async def _check_one(url: str) -> bool:
+
+async def probe_station(url: str) -> dict:
+    """
+    방송국 하나를 실제로 검사해서 상세 결과를 돌려준다 (진단용).
+    자동 배치 헬스체크와 어드민의 '지금 확인' 버튼 둘 다 이 함수를 쓴다.
+    """
+    started = time.monotonic()
     try:
         async with httpx.AsyncClient() as client:
-            # 먼저 HEAD로 가볍게 시도 (일부 icecast/shoutcast 서버는 지원 안 함)
-            try:
-                res = await client.head(url, follow_redirects=True, timeout=TIMEOUT_SECONDS)
-                if res.status_code < 400:
-                    return True
-            except (httpx.HTTPError, httpx.TimeoutException):
-                pass
-
-            # HEAD가 안 되면 스트림을 잠깐 열어서 상태 코드만 확인하고 즉시 닫는다.
-            # (오디오 데이터를 실제로 다운로드하지 않도록 바로 close)
             async with client.stream(
                 "GET", url, follow_redirects=True, timeout=TIMEOUT_SECONDS
             ) as res:
-                return res.status_code < 400
-    except (httpx.HTTPError, httpx.TimeoutException):
-        return False
+                if res.status_code >= 400:
+                    return {
+                        "ok": False,
+                        "reason": f"status_{res.status_code}",
+                        "status_code": res.status_code,
+                        "bytes_received": 0,
+                        "content_type": res.headers.get("content-type", ""),
+                        "elapsed_ms": round((time.monotonic() - started) * 1000),
+                    }
+
+                content_type = res.headers.get("content-type", "").lower()
+                bytes_received = 0
+                async for chunk in res.aiter_bytes():
+                    bytes_received += len(chunk)
+                    if bytes_received >= MIN_BYTES:
+                        break
+
+                is_audio_type = any(h in content_type for h in AUDIO_CONTENT_TYPE_HINTS) or content_type == ""
+                ok = bytes_received >= MIN_BYTES and is_audio_type
+
+                reason = "ok"
+                if bytes_received < MIN_BYTES:
+                    reason = "no_data"  # 연결은 됐지만 실제 데이터가 안 흐름 (무음/빈 스트림)
+                elif not is_audio_type:
+                    reason = "not_audio"  # 오디오가 아닌 걸 돌려줌 (HTML 에러 페이지 등)
+
+                return {
+                    "ok": ok,
+                    "reason": reason,
+                    "status_code": res.status_code,
+                    "bytes_received": bytes_received,
+                    "content_type": content_type,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000),
+                }
+    except httpx.TimeoutException:
+        return {
+            "ok": False, "reason": "timeout", "status_code": None,
+            "bytes_received": 0, "content_type": "",
+            "elapsed_ms": round((time.monotonic() - started) * 1000),
+        }
+    except httpx.HTTPError as e:
+        return {
+            "ok": False, "reason": f"connection_error", "status_code": None,
+            "bytes_received": 0, "content_type": "",
+            "elapsed_ms": round((time.monotonic() - started) * 1000),
+        }
+
+
+async def _check_one(url: str) -> bool:
+    result = await probe_station(url)
+    return result["ok"]
 
 
 async def run_health_check_batch() -> dict:

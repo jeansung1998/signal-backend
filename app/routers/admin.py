@@ -18,6 +18,8 @@ import os
 from fastapi import APIRouter, Header, HTTPException, Query
 
 from app.database import get_supabase
+from app.radio_health import probe_station
+from app.tv_health import probe_channel
 
 router = APIRouter()
 
@@ -474,3 +476,29 @@ def add_station(
         sb.table("tv_channels").insert(row).execute()
 
     return {"ok": True}
+
+
+@router.post("/stations/test")
+async def test_station_now(
+    body: dict,
+    x_user_id: str | None = Header(None),
+):
+    """
+    방송국/채널 하나를 지금 이 순간 실제로 검사한다 (전선 테스터처럼
+    "지금 흐르는지" 즉석 확인). 자동 헬스체크 결과를 기다리지 않고
+    Inspection 화면에서 바로 눌러서 확인할 때 쓴다. DB는 건드리지
+    않고 결과만 돌려준다 — 필요하면 확인 후 직접 hide/restore로
+    처리하면 된다.
+    body: {"type": "radio"|"tv", "url": "..."}
+    """
+    _require_admin(x_user_id)
+    type_ = body.get("type")
+    url = body.get("url")
+    if type_ not in _STATION_TABLES or not url:
+        raise HTTPException(status_code=400, detail="type과 url이 필요합니다")
+
+    if type_ == "radio":
+        result = await probe_station(url)
+    else:
+        result = await probe_channel(url)
+    return result
