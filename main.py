@@ -12,6 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.routers import presence, users, match, radio, ws, travel, admin, translate_api, tv, tv_favorites
 from app.tv_health import run_health_check_batch
+from app.radio_health import run_health_check_batch as run_radio_health_check_batch
 
 app = FastAPI(title="SIGNAL API", version="0.1.0")
 
@@ -39,10 +40,24 @@ scheduler = AsyncIOScheduler()
 
 @app.on_event("startup")
 async def start_scheduler():
+    import datetime
+
     # 1시간마다 오래 점검 안 된 TV 채널부터 300개씩 헬스체크.
     # 만 개 넘는 전체 목록을 한 번에 다 돌면 부담이 커서 이렇게
     # 조금씩 계속 순환하며 확인하는 방식으로 감.
     scheduler.add_job(run_health_check_batch, "interval", hours=1, id="tv_health_check")
+
+    # 라디오도 동일한 방식(1시간마다 300개씩). TV와 같은 순간에
+    # 동시에 돌면 서버 리소스가 겹치니, 시작 시각을 30분 뒤로
+    # 밀어서 서로 어긋나게 돈다.
+    radio_start = datetime.datetime.now() + datetime.timedelta(minutes=30)
+    scheduler.add_job(
+        run_radio_health_check_batch,
+        "interval",
+        hours=1,
+        id="radio_health_check",
+        next_run_time=radio_start,
+    )
     scheduler.start()
 
 

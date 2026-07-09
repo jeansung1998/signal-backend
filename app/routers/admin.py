@@ -151,11 +151,24 @@ def quality_metrics(x_user_id: str | None = Header(None)):
     accepted_m = accepted_matches.count or 0
     success_ratio = (accepted_m / total_m) if total_m else 0
 
+    total_stations = sb.table("radio_stations").select("stationuuid", count="exact").execute()
+    active_stations = (
+        sb.table("radio_stations").select("stationuuid", count="exact").eq("is_active", True).execute()
+    )
+    total_st = total_stations.count or 0
+    active_st = active_stations.count or 0
+    st_active_ratio = (active_st / total_st) if total_st else 0
+
     return {
         "tv_channels": {
             "total": total_ch,
             "active": active_ch,
             "active_ratio": round(active_ratio, 4),
+        },
+        "radio_stations": {
+            "total": total_st,
+            "active": active_st,
+            "active_ratio": round(st_active_ratio, 4),
         },
         "match_requests": {
             "total": total_m,
@@ -163,3 +176,98 @@ def quality_metrics(x_user_id: str | None = Header(None)):
             "success_ratio": round(success_ratio, 4),
         },
     }
+
+
+# ---------------------------------------------------------------
+# 죽은 방송국/채널 관리 — 헬스체크가 is_active=false로 내린 것들을
+# 어드민 화면에서 확인하고, 확실히 죽었으면 영구 제외(is_hidden)
+# 시키거나, 다시 살아난 것 같으면 복구시킬 수 있게 한다.
+# ---------------------------------------------------------------
+_STATION_TABLES = {
+    "radio": {"table": "radio_stations", "id_field": "stationuuid"},
+    "tv": {"table": "tv_channels", "id_field": "id"},
+}
+
+
+@router.get("/stations/dead")
+def list_dead_stations(
+    x_user_id: str | None = Header(None),
+    type: str = Query(..., description="radio 또는 tv"),
+    limit: int = 50,
+    offset: int = 0,
+):
+    """
+    헬스체크에서 죽은 것으로 판정된(is_active=false) 방송국/채널 목록.
+    아직 영구 제외(is_hidden) 처리 안 된 것들만 보여준다 — 이미
+    영구 제외한 건 검토가 끝난 거니 목록에서 뺀다.
+    consecutive_fail_count가 높은 순(오래 죽어있는 순)으로 정렬.
+    """
+    _require_admin(x_user_id)
+    if type not in _STATION_TABLES:
+        raise HTTPException(status_code=400, detail="type은 'radio' 또는 'tv'여야 합니다")
+
+    cfg = _STATION_TABLES[type]
+    sb = get_supabase()
+    select_fields = (
+        "stationuuid, name, url, country, consecutive_fail_count, last_checked_at, last_ok_at"
+        if type == "radio"
+        else "id, name, url, country, consecutive_fail_count, last_checked_at, last_ok_at"
+    )
+    res = (
+        sb.table(cfg["table"])
+        .select(select_fields, count="exact")
+        .eq("is_active", False)
+        .eq("is_hidden", False)
+        .order("consecutive_fail_count", desc=True)
+        .range(offset, offset + limit - 1)
+        .execute()
+    )
+    return {"total": res.count, "items": res.data or []}
+
+
+@router.post("/stations/hide")
+def hide_station(
+    body: dict,
+    x_user_id: str | None = Header(None),
+):
+    """
+    확인 후 확실히 죽은 방송국/채널을 영구 제외시킨다 (is_hidden=true).
+    이후 헬스체크 대상에서도 빠지고, 앱에도 다시 노출되지 않는다.
+    body: {"type": "radio"|"tv", "id": "..."}
+    """
+    _require_admin(x_user_id)
+    type_ = body.get("type")
+    item_id = body.get("id")
+    if type_ not in _STATION_TABLES or not item_id:
+        raise HTTPException(status_code=400, detail="type과 id가 필요합니다")
+
+    cfg = _STATION_TABLES[type_]
+    sb = get_supabase()
+    sb.table(cfg["table"]).update({"is_hidden": True}).eq(cfg["id_field"], item_id).execute()
+    return {"ok": True}
+
+
+@router.post("/stations/restore")
+def restore_station(
+    body: dict,
+    x_user_id: str | None = Header(None),
+):
+    """
+    다시 살아난 것 같은 방송국/채널을 원상복구한다 — 실패 카운트를
+    리셋하고 활성 처리해서 다음 헬스체크 때부터 정상 취급되게 한다.
+    body: {"type": "radio"|"tv", "id": "..."}
+    """
+    _require_admin(x_user_id)
+    type_ = body.get("type")
+    item_id = body.get("id")
+    if type_ not in _STATION_TABLES or not item_id:
+        raise HTTPException(status_code=400, detail="type과 id가 필요합니다")
+
+    cfg = _STATION_TABLES[type_]
+    sb = get_supabase()
+    sb.table(cfg["table"]).update({
+        "is_active": True,
+        "is_hidden": False,
+        "consecutive_fail_count": 0,
+    }).eq(cfg["id_field"], item_id).execute()
+    return {"ok": True}

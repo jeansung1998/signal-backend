@@ -15,9 +15,11 @@ import time
 import logging
 
 import httpx
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Header, Query
 
 from app.database import get_supabase
+from app.radio_health import run_health_check_batch
+from app.routers.admin import _require_admin
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -85,6 +87,7 @@ def stations_near(
         .select("stationuuid, name, url, favicon, tags, country, votes, geo_lat, geo_long, is_synthetic_geo")
         .eq("countrycode", resolved_countrycode.upper())
         .eq("is_hidden", False)
+        .eq("is_active", True)
         .execute()
     )
     candidates = res.data or []
@@ -184,6 +187,7 @@ def radio_markers():
             sb.table("radio_stations")
             .select("stationuuid, name, url, favicon, country, geo_lat, geo_long")
             .eq("is_hidden", False)
+            .eq("is_active", True)
             .range(offset, offset + page_size - 1)
             .execute()
         )
@@ -199,4 +203,13 @@ def radio_markers():
     result = list(clusters.values())
     _markers_cache["data"] = result
     _markers_cache["ts"] = now
+    return result
+
+
+@router.post("/health-check")
+async def trigger_health_check(x_user_id: str | None = Header(None)):
+    """헬스체크 배치 1회를 수동으로 즉시 실행한다 (관리자 전용, 디버깅용)."""
+    _require_admin(x_user_id)
+    result = await run_health_check_batch()
+    _markers_cache["data"] = None  # 활성 상태가 바뀌었을 수 있으니 마커 캐시도 무효화
     return result
