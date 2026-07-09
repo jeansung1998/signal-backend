@@ -81,4 +81,17 @@ async def run_health_check_batch() -> dict:
                 deactivated += 1
             sb.table("tv_channels").update(update).eq("id", row["id"]).execute()
 
-    return {"checked": len(rows), "alive": alive_count, "deactivated": deactivated}
+    result = {"checked": len(rows), "alive": alive_count, "deactivated": deactivated}
+
+    # 나중에 어드민 대시보드에서 추이 그래프로 보여줄 수 있게 기록.
+    try:
+        sb.table("station_health_log").insert({
+            "type": "tv",
+            "checked": result["checked"],
+            "alive": result["alive"],
+            "deactivated": result["deactivated"],
+        }).execute()
+    except Exception:
+        pass  # 로그 기록 실패는 헬스체크 자체 실패로 취급하지 않는다
+
+    return result

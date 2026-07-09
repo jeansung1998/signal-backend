@@ -184,8 +184,8 @@ def quality_metrics(x_user_id: str | None = Header(None)):
 # 시키거나, 다시 살아난 것 같으면 복구시킬 수 있게 한다.
 # ---------------------------------------------------------------
 _STATION_TABLES = {
-    "radio": {"table": "radio_stations", "id_field": "stationuuid"},
-    "tv": {"table": "tv_channels", "id_field": "id"},
+    "radio": {"table": "radio_stations", "id_field": "stationuuid", "country_field": "country"},
+    "tv": {"table": "tv_channels", "id_field": "id", "country_field": "country_code"},
 }
 
 
@@ -208,11 +208,9 @@ def list_dead_stations(
 
     cfg = _STATION_TABLES[type]
     sb = get_supabase()
-    select_fields = (
-        "stationuuid, name, url, country, consecutive_fail_count, last_checked_at, last_ok_at"
-        if type == "radio"
-        else "id, name, url, country, consecutive_fail_count, last_checked_at, last_ok_at"
-    )
+    country_field = cfg["country_field"]
+    id_field = cfg["id_field"]
+    select_fields = f"{id_field}, name, url, {country_field}, consecutive_fail_count, last_checked_at, last_ok_at"
     res = (
         sb.table(cfg["table"])
         .select(select_fields, count="exact")
@@ -270,4 +268,209 @@ def restore_station(
         "is_hidden": False,
         "consecutive_fail_count": 0,
     }).eq(cfg["id_field"], item_id).execute()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------
+# Inspection 대시보드 — 방송국/채널을 국가별로 훑어보고, 상태별로
+# 필터링하고, 추이 그래프를 보고, 여러 개를 한 번에 정리하거나
+# 새 방송국/채널을 직접 등록할 수 있게 하는 종합 관리 화면.
+# ---------------------------------------------------------------
+
+@router.get("/stations/overview")
+def stations_overview(
+    x_user_id: str | None = Header(None),
+    type: str = Query(..., description="radio 또는 tv"),
+):
+    """
+    전체 개수 / 활성 / 비활성 개수 + 국가별 분포(활성/비활성 나눠서).
+    Inspection 대시보드 첫 화면에서 쓰는 요약 통계.
+    """
+    _require_admin(x_user_id)
+    if type not in _STATION_TABLES:
+        raise HTTPException(status_code=400, detail="type은 'radio' 또는 'tv'여야 합니다")
+    cfg = _STATION_TABLES[type]
+    sb = get_supabase()
+
+    total = sb.table(cfg["table"]).select(cfg["id_field"], count="exact").eq("is_hidden", False).execute()
+    active = (
+        sb.table(cfg["table"]).select(cfg["id_field"], count="exact")
+        .eq("is_hidden", False).eq("is_active", True).execute()
+    )
+    total_n = total.count or 0
+    active_n = active.count or 0
+    dead_n = total_n - active_n
+
+    # 국가별 분포는 행이 많아 파이썬에서 직접 집계 (country, is_active만 가져옴)
+    country_field = cfg["country_field"]
+    country_rows: list = []
+    page_size = 900
+    offset = 0
+    while True:
+        res = (
+            sb.table(cfg["table"]).select(f"{country_field}, is_active")
+            .eq("is_hidden", False)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        page = res.data or []
+        country_rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+
+    by_country: dict[str, dict] = {}
+    for r in country_rows:
+        c = r.get(country_field) or "미상"
+        entry = by_country.setdefault(c, {"country": c, "total": 0, "active": 0, "dead": 0})
+        entry["total"] += 1
+        if r.get("is_active"):
+            entry["active"] += 1
+        else:
+            entry["dead"] += 1
+
+    countries = sorted(by_country.values(), key=lambda x: x["total"], reverse=True)
+
+    return {
+        "total": total_n,
+        "active": active_n,
+        "dead": dead_n,
+        "countries": countries,
+    }
+
+
+@router.get("/stations/list")
+def stations_list(
+    x_user_id: str | None = Header(None),
+    type: str = Query(..., description="radio 또는 tv"),
+    country: str | None = Query(None, description="국가 코드/이름으로 필터"),
+    status: str | None = Query(None, description="'active' 또는 'dead' (생략하면 전체)"),
+    search: str | None = Query(None, description="이름으로 검색"),
+    limit: int = 50,
+    offset: int = 0,
+):
+    """
+    국가/상태/검색어로 필터링한 방송국/채널 목록. Inspection 대시보드에서
+    국가 카드를 클릭했을 때, 또는 검색할 때 쓰는 용도.
+    """
+    _require_admin(x_user_id)
+    if type not in _STATION_TABLES:
+        raise HTTPException(status_code=400, detail="type은 'radio' 또는 'tv'여야 합니다")
+    cfg = _STATION_TABLES[type]
+    sb = get_supabase()
+    country_field = cfg["country_field"]
+    id_field = cfg["id_field"]
+
+    select_fields = (
+        f"{id_field}, name, url, {country_field}, is_active, consecutive_fail_count, last_checked_at, last_ok_at"
+    )
+    query = sb.table(cfg["table"]).select(select_fields, count="exact").eq("is_hidden", False)
+    if country:
+        query = query.eq(country_field, country)
+    if status == "active":
+        query = query.eq("is_active", True)
+    elif status == "dead":
+        query = query.eq("is_active", False)
+    if search:
+        query = query.ilike("name", f"%{search}%")
+
+    res = query.order("name").range(offset, offset + limit - 1).execute()
+    return {"total": res.count, "items": res.data or []}
+
+
+@router.get("/stations/history")
+def stations_history(
+    x_user_id: str | None = Header(None),
+    type: str = Query(..., description="radio 또는 tv"),
+    limit: int = 50,
+):
+    """
+    헬스체크 배치 기록 추이 (수신/송출 그래프용) — 최근 실행분부터
+    오래된 순으로 최대 limit개. 프론트에서 시간순으로 뒤집어서
+    그래프 그리면 된다.
+    """
+    _require_admin(x_user_id)
+    if type not in _STATION_TABLES:
+        raise HTTPException(status_code=400, detail="type은 'radio' 또는 'tv'여야 합니다")
+    sb = get_supabase()
+    res = (
+        sb.table("station_health_log")
+        .select("checked, alive, deactivated, created_at")
+        .eq("type", type)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return {"items": list(reversed(res.data or []))}
+
+
+@router.post("/stations/bulk-hide")
+def bulk_hide_stations(
+    body: dict,
+    x_user_id: str | None = Header(None),
+):
+    """
+    여러 개를 한 번에 영구 제외 (페이지 전체 삭제용).
+    body: {"type": "radio"|"tv", "ids": ["...", "..."]}
+    """
+    _require_admin(x_user_id)
+    type_ = body.get("type")
+    ids = body.get("ids")
+    if type_ not in _STATION_TABLES or not ids or not isinstance(ids, list):
+        raise HTTPException(status_code=400, detail="type과 ids(배열)가 필요합니다")
+
+    cfg = _STATION_TABLES[type_]
+    sb = get_supabase()
+    sb.table(cfg["table"]).update({"is_hidden": True}).in_(cfg["id_field"], ids).execute()
+    return {"ok": True, "hidden_count": len(ids)}
+
+
+@router.post("/stations/add")
+def add_station(
+    body: dict,
+    x_user_id: str | None = Header(None),
+):
+    """
+    새 방송국/채널을 수동으로 등록한다.
+    body(radio): {"type": "radio", "name": "...", "url": "...", "country": "...",
+                   "countrycode": "KR", "geo_lat": 37.5, "geo_long": 127.0}
+    body(tv):    {"type": "tv", "name": "...", "url": "...", "country": "..."}
+    """
+    _require_admin(x_user_id)
+    type_ = body.get("type")
+    name = body.get("name")
+    url = body.get("url")
+    if type_ not in _STATION_TABLES or not name or not url:
+        raise HTTPException(status_code=400, detail="type, name, url이 필요합니다")
+
+    sb = get_supabase()
+    if type_ == "radio":
+        import uuid
+        row = {
+            "stationuuid": str(uuid.uuid4()),
+            "name": name,
+            "url": url,
+            "country": body.get("country", ""),
+            "countrycode": body.get("countrycode", ""),
+            "geo_lat": body.get("geo_lat"),
+            "geo_long": body.get("geo_long"),
+            "is_hidden": False,
+            "is_active": True,
+            "is_synthetic_geo": body.get("geo_lat") is None,
+        }
+        sb.table("radio_stations").insert(row).execute()
+    else:
+        import re
+        import uuid
+        slug = re.sub(r"[^a-zA-Z0-9]+", "", name)[:20] or "channel"
+        row = {
+            "id": f"manual-{slug}-{uuid.uuid4().hex[:8]}",
+            "name": name,
+            "url": url,
+            "country_code": body.get("country", ""),
+            "is_hidden": False,
+            "is_active": True,
+        }
+        sb.table("tv_channels").insert(row).execute()
+
     return {"ok": True}
