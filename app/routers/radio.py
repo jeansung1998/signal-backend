@@ -169,13 +169,29 @@ def radio_markers():
         return _markers_cache["data"]
 
     sb = get_supabase()
-    res = (
-        sb.table("radio_stations")
-        .select("stationuuid, name, url, favicon, country, geo_lat, geo_long")
-        .eq("is_hidden", False)
-        .execute()
-    )
-    stations = res.data or []
+
+    # PostgREST default caps a single response at 1000 rows. With 9,000+
+    # stations in the table, a plain .execute() silently truncates to the
+    # first ~1000 rows in DB order — which happened to be almost entirely
+    # European countries (alphabetically early country codes), making every
+    # other country's markers disappear. Page through with .range() so we
+    # actually get everything.
+    stations: list = []
+    page_size = 900  # PostgREST 기본 캡(1000)보다 여유 있게 낮춰서 안전하게
+    offset = 0
+    while True:
+        res = (
+            sb.table("radio_stations")
+            .select("stationuuid, name, url, favicon, country, geo_lat, geo_long")
+            .eq("is_hidden", False)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        page = res.data or []
+        stations.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
 
     clusters: dict[tuple[float, float], dict] = {}
     _add_to_clusters(clusters, stations)
