@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.routers import presence, users, match, radio, ws, travel, admin, translate_api, tv, tv_favorites
+from app.routers import presence, users, match, radio, ws, travel, admin, translate_api, tv, tv_favorites, country_api
 from app.tv_health import run_health_check_batch
 from app.radio_health import run_health_check_batch as run_radio_health_check_batch
 
@@ -34,6 +34,7 @@ app.include_router(admin.router, prefix="/admin", tags=["admin"])
 app.include_router(translate_api.router, tags=["translate"])
 app.include_router(tv.router, prefix="/tv", tags=["tv"])
 app.include_router(tv_favorites.router, tags=["tv_favorites"])
+app.include_router(country_api.router, tags=["countries"])
 
 scheduler = AsyncIOScheduler()
 
