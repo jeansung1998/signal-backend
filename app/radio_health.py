@@ -17,10 +17,10 @@ import httpx
 
 from app.database import get_supabase
 
-BATCH_SIZE = 300
+BATCH_SIZE = 1000
 CONCURRENCY = 20
 TIMEOUT_SECONDS = 8
-FAIL_THRESHOLD = 3  # 연속 3번 실패하면 비활성화
+FAIL_THRESHOLD = 1  # 연속 3번 실패하면 비활성화
 
 MIN_BYTES = 2048  # 이 이상 실제로 받아야 "진짜 흐른다"고 판단 (2KB)
 AUDIO_CONTENT_TYPE_HINTS = ("audio", "mpeg", "ogg", "aac", "mp3", "octet-stream")
