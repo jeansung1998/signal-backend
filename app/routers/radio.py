@@ -213,3 +213,50 @@ async def trigger_health_check(x_user_id: str | None = Header(None)):
     result = await run_health_check_batch()
     _markers_cache["data"] = None  # 활성 상태가 바뀌었을 수 있으니 마커 캐시도 무효화
     return result
+
+@router.get("/search")
+def search_stations(
+    q: str = Query(..., description="검색어 (태그, 방송국 이름)"),
+    limit: int = 50,
+    offset: int = 0,
+):
+    """
+    태그 또는 방송국 이름으로 검색.
+    tags 컬럼과 name 컬럼에서 검색어를 포함하는 활성 방송국을 반환한다.
+    """
+    sb = get_supabase()
+    
+    by_name = (
+        sb.table("radio_stations")
+        .select("stationuuid, name, url, favicon, tags, country, countrycode, votes, geo_lat, geo_long", count="exact")
+        .ilike("name", f"%{q}%")
+        .eq("is_hidden", False)
+        .eq("is_active", True)
+        .order("votes", desc=True)
+        .range(offset, offset + limit - 1)
+        .execute()
+    )
+    
+    by_tag = (
+        sb.table("radio_stations")
+        .select("stationuuid, name, url, favicon, tags, country, countrycode, votes, geo_lat, geo_long", count="exact")
+        .ilike("tags", f"%{q}%")
+        .eq("is_hidden", False)
+        .eq("is_active", True)
+        .order("votes", desc=True)
+        .range(offset, offset + limit - 1)
+        .execute()
+    )
+    
+    seen = set()
+    items = []
+    for row in (by_name.data or []) + (by_tag.data or []):
+        if row["stationuuid"] not in seen:
+            seen.add(row["stationuuid"])
+            items.append(row)
+    
+    return {
+        "total": len(items),
+        "items": items[:limit],
+        "query": q,
+    }
