@@ -112,6 +112,8 @@ def stations_near(
             "distance_km": round(dist, 1),
             "resolved_countrycode": resolved_countrycode,
             "is_synthetic_geo": s.get("is_synthetic_geo", False),
+            "geo_lat": s.get("geo_lat"),
+            "geo_long": s.get("geo_long"),
         }
         for dist, s in ranked[:limit]
     ]
