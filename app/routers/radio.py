@@ -180,12 +180,12 @@ def radio_markers():
     # other country's markers disappear. Page through with .range() so we
     # actually get everything.
     stations: list = []
-    page_size = 900  # PostgREST 기본 캡(1000)보다 여유 있게 낮춰서 안전하게
+    page_size = 5000  # PostgREST 기본 캡(1000)보다 여유 있게 낮춰서 안전하게
     offset = 0
     while True:
         res = (
             sb.table("radio_stations")
-            .select("stationuuid, name, url, favicon, country, geo_lat, geo_long")
+            .select("stationuuid, name, url, country, countrycode, geo_lat, geo_long")
             .eq("is_hidden", False)
             .eq("is_active", True)
             .range(offset, offset + page_size - 1)
