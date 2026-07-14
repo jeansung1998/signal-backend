@@ -266,14 +266,27 @@ def search_stations(
 def radio_markers_full(offset: int = 0, limit: int = 5000):
     """개별 방송국 마커 — 청크 단위로 반환 (프론트에서 점진적 로딩용)"""
     sb = get_supabase()
-    res = (
-        sb.table("radio_stations")
-        .select("stationuuid, name, url, favicon, country, geo_lat, geo_long")
-        .eq("is_hidden", False)
-        .eq("is_active", True)
-        .not_.is_("geo_lat", "null")
-        .not_.is_("geo_long", "null")
-        .range(offset, offset + limit - 1)
-        .execute()
-    )
-    return res.data or []
+    all_data = []
+    page_size = 1000  # Supabase 캡
+    inner_offset = offset
+    target = offset + limit
+    
+    while inner_offset < target:
+        fetch_size = min(page_size, target - inner_offset)
+        res = (
+            sb.table("radio_stations")
+            .select("stationuuid, name, url, favicon, country, geo_lat, geo_long")
+            .eq("is_hidden", False)
+            .eq("is_active", True)
+            .not_.is_("geo_lat", "null")
+            .not_.is_("geo_long", "null")
+            .range(inner_offset, inner_offset + fetch_size - 1)
+            .execute()
+        )
+        page = res.data or []
+        all_data.extend(page)
+        if len(page) < fetch_size:
+            break
+        inner_offset += fetch_size
+    
+    return all_data
